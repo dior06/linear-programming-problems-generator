@@ -36,8 +36,7 @@ def generate_tex(tasks, tex_filename="tasks_solutions.tex"):
             for idx, coef in enumerate(c):
                 sign = "+" if (coef >= 0 and idx > 0) else ""
                 obj_parts.append(f"{sign}{coef}x_{{{idx+1}}}")
-            f.write(r"maximize $ " + " ".join(obj_parts) + r" $\\" "\n\n")
-            
+            f.write("maximize $ " + " ".join(obj_parts) + " $\\\\\n\n")
             f.write(r"\textbf{Ограничения:}" "\n\n")
             f.write(r"\[ \begin{aligned}" "\n")
             for row_idx, row in enumerate(A):
@@ -45,8 +44,8 @@ def generate_tex(tasks, tex_filename="tasks_solutions.tex"):
                 for var_idx, val in enumerate(row):
                     sign = "+" if (val >= 0 and var_idx > 0) else ""
                     row_expr.append(f"{sign}{val}x_{{{var_idx+1}}}")
-                f.write(" ".join(row_expr) + f" &\\le {b[row_idx]} \\\n")
-            f.write(r"x_i &\ge 0, \quad i=1,\dots," + str(len(c)) + r" \\" "\n")
+                f.write(" ".join(row_expr) + f" &\\le {b[row_idx]} \\\\ \n")
+            f.write("x_i &\\ge 0, \\quad i=1,\\dots," + str(len(c)) + " \\\\ \n")
             f.write(r"\end{aligned}\]" "\n\n")
             
             if info["solution_found"]:
