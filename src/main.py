@@ -1,4 +1,3 @@
-import os
 import subprocess
 import numpy as np
 
@@ -61,7 +60,6 @@ def format_number(x):
     else:
         return f"{x:.2f}"
 
-
 def make_var_names(n, slack_count=0, art_count=0):
     names = []
     for i in range(n):
@@ -78,7 +76,7 @@ def run_phase1_iterations(phase1_table, basis, art_indices, tol=1e-10, max_iter=
     var_names = make_var_names(n, slack_count, art_count)
     col_labels = var_names + ["RHS"]
     logs = [] if save_logs else None
-    def snap(iterc, pc=None, pr=None):
+    def snap(iterc):
         if logs is not None:
             lines = [f"=== Итерация {iterc} ===", "Таблица:"]
             header_row = ["   "] + [f"{nm:>7s}" for nm in col_labels]
@@ -92,10 +90,8 @@ def run_phase1_iterations(phase1_table, basis, art_indices, tol=1e-10, max_iter=
                 line_str = f"{row_label:>3s} | " + " | ".join(row_data)
                 lines.append(line_str)
             obj_row_data = [f"{format_number(val):>7s}" for val in phase1_table[m, :]]
-            line_str = f"{'Obj':>3s} | " + " | ".join(obj_row_data)
+            line_str = f"{' z ':>3s} | " + " | ".join(obj_row_data)
             lines.append(line_str)
-            basis_vars = [var_names[b] if b < len(var_names) else f"??" for b in basis]
-            lines.append(f"basis = {basis_vars}\n")
             logs.append("\n".join(lines))
     def pivot_op(prow, pcol):
         piv = phase1_table[prow, pcol]
@@ -105,14 +101,11 @@ def run_phase1_iterations(phase1_table, basis, art_indices, tol=1e-10, max_iter=
                 fac = phase1_table[rr, pcol]
                 phase1_table[rr, :] -= fac * phase1_table[prow, :]
     itc = 0
-    snap(itc)
     while itc < max_iter:
-        itc += 1
         obj_row = phase1_table[m, :nvars]
         pivot_col = np.argmin(obj_row)
         min_val = obj_row[pivot_col]
         if min_val >= -tol:
-            snap(itc)
             break
         pivot_row = -1
         best_rat = None
@@ -124,11 +117,11 @@ def run_phase1_iterations(phase1_table, basis, art_indices, tol=1e-10, max_iter=
                     best_rat = ratio
                     pivot_row = i
         if pivot_row < 0:
-            snap(itc, pivot_col, pivot_row)
             return False, phase1_table, basis, ("\n".join(logs) if logs else None)
-        snap(itc, pivot_col, pivot_row)
+        snap(itc)
         pivot_op(pivot_row, pivot_col)
         basis[pivot_row] = pivot_col
+        itc += 1
     if itc >= max_iter:
         return False, phase1_table, basis, ("\n".join(logs) if logs else None)
     sum_art = -phase1_table[m, -1]
@@ -159,7 +152,7 @@ def run_phase2_iterations(table2, basis, n, slack_count, tol=1e-10, max_iter=100
     var_names = make_var_names(n, slack_count, art_count=0)
     col_labels = var_names + ["RHS"]
     logs = [] if save_logs else None
-    def snap(itc, pc=None, pr=None):
+    def snap(itc):
         if logs is not None:
             lines = [f"=== Фаза 2, итерация {itc} ===", "Таблица:"]
             header_row = ["   "] + [f"{nm:>7s}" for nm in col_labels]
@@ -171,11 +164,9 @@ def run_phase2_iterations(table2, basis, n, slack_count, tol=1e-10, max_iter=100
                 line_str = f"{row_label:>3s} | " + " | ".join(row_data)
                 lines.append(line_str)
             obj_data = [f"{format_number(val):>7s}" for val in table2[m, :]]
-            line_str = f"{'Obj':>3s} | " + " | ".join(obj_data)
+            line_str = f"{' z ':>3s} | " + " | ".join(obj_data)
             lines.append(line_str)
 
-            basis_vars = [var_names[b] if b < len(var_names) else f"??" for b in basis]
-            lines.append(f"basis={basis_vars}\n")
             logs.append("\n".join(lines))
     def pivot_op(prow, pcol):
         piv = table2[prow, pcol]
@@ -185,15 +176,12 @@ def run_phase2_iterations(table2, basis, n, slack_count, tol=1e-10, max_iter=100
                 fac = table2[rr, pcol]
                 table2[rr, :] -= fac * table2[prow, :]
     itc = 0
-    snap(itc)
     while itc < max_iter:
-        itc += 1
         obj_row = table2[m, :nvars]
         pivot_col = np.argmin(obj_row)
         min_val = obj_row[pivot_col]
         if min_val >= -tol:
-            snap(itc)
-            return True, table2, basis, ("\n".join(logs) if logs else None)
+            break
         pivot_row = -1
         best_ratio = None
         for i in range(m):
@@ -204,12 +192,14 @@ def run_phase2_iterations(table2, basis, n, slack_count, tol=1e-10, max_iter=100
                     best_ratio = ratio
                     pivot_row = i
         if pivot_row < 0:
-            snap(itc, pivot_col, pivot_row)
             return False, table2, basis, ("\n".join(logs) if logs else None)
-        snap(itc, pivot_col, pivot_row)
+        snap(itc)
         pivot_op(pivot_row, pivot_col)
         basis[pivot_row] = pivot_col
-    return False, table2, basis, ("\n".join(logs) if logs else None)
+        itc += 1
+    if itc >= max_iter:
+        return False, table2, basis, ("\n".join(logs) if logs else None)
+    return True, table2, basis, ("\n".join(logs) if logs else None)
 
 def extract_solution(table2, basis, n, slack_count, art_count, tol=1e-10):
     m = table2.shape[0] - 1
@@ -251,16 +241,16 @@ def solve_LP_two_phase(A, b, con_types, c):
     art_count = sum(f for f in need_art)
     p1_table, basis, sidx, aidx = build_phase1_table(A_le, b_le, need_art)
     feasible1, p1_table, basis, log1 = run_phase1_iterations(
-    p1_table,
-    basis,
-    aidx,
-    tol=1e-10,
-    max_iter=1000,
-    save_logs=True,
-    n=n,
-    slack_count=slack_count,
-    art_count=art_count
-)
+        p1_table,
+        basis,
+        aidx,
+        tol=1e-10,
+        max_iter=1000,
+        save_logs=True,
+        n=n,
+        slack_count=slack_count,
+        art_count=art_count
+    )
     for i in range(m):
         if basis[i] >= n + slack_count:
             for j in range(n + slack_count):
@@ -278,7 +268,9 @@ def solve_LP_two_phase(A, b, con_types, c):
     if not feasible1:
         return (False, None, None, "Infeasible\n" + (log1 or ""))
     table2 = prepare_phase2_table(p1_table, basis, c, n, slack_count, art_count)
-    ok2, final_table, final_basis, log2 = run_phase2_iterations(table2, basis, n, slack_count, save_logs=True)
+    ok2, final_table, final_basis, log2 = run_phase2_iterations(
+        table2, basis, n, slack_count, save_logs=True
+    )
     logs = (log1 or "") + "\n=== PHASE2===\n" + (log2 or "")
     if not ok2:
         return (False, None, None, "Unbounded or stuck\n" + logs)
@@ -327,7 +319,7 @@ def generate_tex(tasks, tex_filename="tasks_solutions.tex"):
             parts = []
             for idx, cf in enumerate(c):
                 sign = "+" if (cf >= 0 and idx > 0) else ""
-                parts.append(f"{sign}{cf}x_{{{idx+1}}}")
+                parts.append(f"{sign}{format_number(cf)}x_{{{idx+1}}}")
             f.write(f"Найти максимум $ {' '.join(parts)} $\\\\" "\n\n")
             f.write(r"\textbf{Ограничения:}" "\n\n")
             f.write(r"\[ \begin{aligned}" "\n")
@@ -335,20 +327,20 @@ def generate_tex(tasks, tex_filename="tasks_solutions.tex"):
                 rowExpr = []
                 for col_j, val_j in enumerate(rowval):
                     s = "+" if (val_j >= 0 and col_j > 0) else ""
-                    rowExpr.append(f"{s}{val_j}x_{{{col_j+1}}}")
+                    rowExpr.append(f"{s}{format_number(val_j)}x_{{{col_j+1}}}")
                 if ctypes[row_i] == "<=":
                     rel = r"\le"
                 elif ctypes[row_i] == ">=":
                     rel = r"\ge"
                 else:
                     rel = "="
-                f.write(" ".join(rowExpr) + f" &{rel} {b[row_i]} \\\\" "\n")
+                f.write(" ".join(rowExpr) + f" &{rel} {format_number(b[row_i])} \\\\" "\n")
             f.write("x_i &\\ge 0,\\quad i=1,..," + str(len(c)) + "\\\\" "\n")
             f.write(r"\end{aligned}\]" "\n\n")
             val = info["optimal_value"]
             xsol = info["solution_vector"]
-            solStr = ", ".join([f"x_{{{vv+1}}}={xsol[vv]:.2f}" for vv in range(len(xsol))])
-            f.write(r"\textbf{Оптимальное значение: }" + "$" + f"{val:.2f}" + "$" "\n\n")
+            f.write(r"\textbf{Оптимальное значение: }" + "$" + format_number(val) + "$" "\n\n")
+            solStr = ", ".join([f"x_{{{vv+1}}}={format_number(xsol[vv])}" for vv in range(len(xsol))])
             f.write(r"\textbf{Решение: }" + "$" + solStr + "$" "\n\n")
             if info["steps"]:
                 f.write(r"\textbf{Шаги двухфазного метода (лог):}" "\n\n")
@@ -357,7 +349,7 @@ def generate_tex(tasks, tex_filename="tasks_solutions.tex"):
                 f.write(r"\end{verbatim}" "\n\n")
             f.write("\n\n")
         f.write(r"\end{document}")
-        
+
 def compile_tex_to_pdf(tex_filename):
     try:
         subprocess.run(["pdflatex", tex_filename], check=True)
@@ -366,8 +358,9 @@ def compile_tex_to_pdf(tex_filename):
         print("pdflatex не найден.")
     except subprocess.CalledProcessError:
         print("Ошибка pdflatex.")
-        
-def main_demo(num_tasks=3, max_regen_attempts=20, output_file_txt="generated_tasks_and_solutions.txt", output_file_tex="tasks_solutions.tex", generate_pdf=True):
+
+def main_demo(num_tasks=3, max_regen_attempts=20, output_file_txt="generated_tasks_and_solutions.txt",
+              output_file_tex="tasks_solutions.tex", generate_pdf=True):
     tasks_info = []
     with open(output_file_txt, "w", encoding="utf-8") as f_out:
         for i in range(num_tasks):
@@ -408,11 +401,11 @@ def main_demo(num_tasks=3, max_regen_attempts=20, output_file_txt="generated_tas
                 })
                 continue
             f_out.write("Найти максимум: ")
-            eq_str = " + ".join([f"{final_c[j]}*x{j+1}" for j in range(len(final_c))])
+            eq_str = " + ".join([f"{format_number(final_c[j])}*x{j+1}" for j in range(len(final_c))])
             f_out.write(eq_str + "\nSubject to:\n")
             for rr, rowv in enumerate(final_A):
-                rowline = " + ".join([f"{rowv[cc]}*x{cc+1}" for cc in range(len(rowv))])
-                f_out.write(f"   {rowline} {final_ct[rr]} {final_b[rr]}\n")
+                rowline = " + ".join([f"{format_number(rowv[cc])}*x{cc+1}" for cc in range(len(rowv))])
+                f_out.write(f"   {rowline} {final_ct[rr]} {format_number(final_b[rr])}\n")
             f_out.write("  x >= 0\n\n")
             f_out.write(f"Оптимальное значение: {final_val:.4f}\n")
             f_out.write("Оптимальное решение: [")
@@ -434,7 +427,7 @@ def main_demo(num_tasks=3, max_regen_attempts=20, output_file_txt="generated_tas
     generate_tex(tasks_info, tex_filename=output_file_tex)
     if generate_pdf:
         compile_tex_to_pdf(output_file_tex)
-    print(f"Сгенерировано {num_tasks} задач, результаты в {output_file_txt}, pdf -> {output_file_tex}")
+    print(f"Сгенерировано {num_tasks} задач(и). Результаты см. в '{output_file_txt}', PDF -> '{output_file_tex}'")
 
 if __name__ == "__main__":
     main_demo(num_tasks=5)
