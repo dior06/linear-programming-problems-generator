@@ -1,53 +1,253 @@
 import os
 import subprocess
 import numpy as np
-from scipy.optimize import linprog
 
-def generate_LP_task(num_vars=2, num_constraints=2, coef_range=(-5, 5)):
-    num_vars = np.random.randint(2, 5)
-    num_constraints = np.random.randint(2, 5)
-    A = np.random.randint(coef_range[0], coef_range[1] + 1, size=(num_constraints, num_vars))
-    b = np.random.randint(1, 6, size=num_constraints)
-    c = np.random.randint(coef_range[0], coef_range[1] + 1, size=num_vars)
-    con_types = np.random.choice(["<=", ">=", "="], size=num_constraints)
-    return A, b, c, con_types
-
-def solve_LP_task(A, b, c, con_types):
-    A_ub = []
-    b_ub = []
-    A_eq = []
-    b_eq = []
-    for i, t in enumerate(con_types):
+def normalize_constraints(A, b, con_types):
+    m, n = A.shape
+    A_out = A.copy().astype(float)
+    b_out = b.copy().astype(float)
+    need_artificial = [False] * m
+    for i in range(m):
+        t = con_types[i]
         if t == "<=":
-            A_ub.append(A[i])
-            b_ub.append(b[i])
+            pass
         elif t == ">=":
-            A_ub.append(-A[i])
-            b_ub.append(-b[i])
+            A_out[i] = -A_out[i]
+            b_out[i] = -b_out[i]
+            need_artificial[i] = True
+        elif t == "=":
+            if b_out[i] < 0:
+                A_out[i] = -A_out[i]
+                b_out[i] = -b_out[i]
+            need_artificial[i] = True
         else:
-            A_eq.append(A[i])
-            b_eq.append(b[i])
-    if len(A_ub) == 0:
-        A_ub = None
-        b_ub = None
-    else:
-        A_ub = np.array(A_ub, dtype=float)
-        b_ub = np.array(b_ub, dtype=float)
-    if len(A_eq) == 0:
-        A_eq = None
-        b_eq = None
-    else:
-        A_eq = np.array(A_eq, dtype=float)
-        b_eq = np.array(b_eq, dtype=float)
-    steps_str = ("=== Шаги симплекс-метода (демонстрация) ===\n"
-                 "1) Составляем симплекс-таблицу на основе ограничений.\n"
-                 "2) Ищем ведущий столбец и строку.\n"
-                 "3) Пересчитываем таблицу.\n"
-                 "4) Проверяем условие оптимальности.\n"
-                 "5) Продолжаем, пока не достигнем оптимума или нет решения.\n")
-    res = linprog(-c, A_ub=A_ub, b_ub=b_ub, A_eq=A_eq, b_eq=b_eq, bounds=[(0, None)] * len(c), method='highs')
-    setattr(res, "steps", steps_str)
-    return res
+            raise ValueError("Unknown constraint type: " + t)
+    return A_out, b_out, need_artificial
+
+def build_phase1_table(A_le, b_le, need_art):
+    m, n = A_le.shape
+    slack_count = sum(not f for f in need_art)
+    art_count = sum(f for f in need_art)
+    total_vars = n + slack_count + art_count
+    phase1_table = np.zeros((m + 1, total_vars + 1), dtype=float)
+    slack_indices = []
+    art_indices = []
+    basis = [None] * m
+    slack_pos = n
+    art_pos = n + slack_count
+    for i in range(m):
+        phase1_table[i, :n] = A_le[i, :]
+        phase1_table[i, -1] = b_le[i]
+        if not need_art[i]:
+            phase1_table[i, slack_pos] = 1.0
+            basis[i] = slack_pos
+            slack_indices.append(slack_pos)
+            slack_pos += 1
+        else:
+            phase1_table[i, art_pos] = 1.0
+            basis[i] = art_pos
+            art_indices.append(art_pos)
+            art_pos += 1
+    for ac in art_indices:
+        phase1_table[m, ac] = -1.0
+    for i in range(m):
+        if basis[i] in art_indices:
+            phase1_table[m, :] -= phase1_table[i, :]
+    return phase1_table, basis, slack_indices, art_indices
+
+def run_phase1_iterations(phase1_table, basis, art_indices, tol=1e-10, max_iter=1000, save_logs=False):
+    m = phase1_table.shape[0] - 1
+    nvars = phase1_table.shape[1] - 1
+    logs = [] if save_logs else None
+    def snap(iterc, pc=None, pr=None):
+        if logs is not None:
+            lines = [f"=== Итерация {iterc} ===", "Таблица:"]
+            for rr in range(phase1_table.shape[0]):
+                rowvals = " ".join(f"{xx:8.3f}" for xx in phase1_table[rr, :])
+                lines.append(rowvals)
+            lines.append(f"basis = {basis}\n")
+            logs.append("\n".join(lines))
+    def pivot_op(prow, pcol):
+        piv = phase1_table[prow, pcol]
+        phase1_table[prow, :] /= piv
+        for rr in range(phase1_table.shape[0]):
+            if rr != prow:
+                fac = phase1_table[rr, pcol]
+                phase1_table[rr, :] -= fac * phase1_table[prow, :]
+    itc = 0
+    snap(itc)
+    while itc < max_iter:
+        itc += 1
+        obj_row = phase1_table[m, :nvars]
+        pivot_col = np.argmin(obj_row)
+        min_val = obj_row[pivot_col]
+        if min_val >= -tol:
+            snap(itc)
+            break
+        pivot_row = -1
+        best_rat = None
+        for i in range(m):
+            el = phase1_table[i, pivot_col]
+            if el > tol:
+                ratio = phase1_table[i, -1] / el
+                if pivot_row < 0 or ratio < best_rat:
+                    best_rat = ratio
+                    pivot_row = i
+        if pivot_row < 0:
+            snap(itc, pivot_col, pivot_row)
+            return False, phase1_table, basis, ("\n".join(logs) if logs else None)
+        snap(itc, pivot_col, pivot_row)
+        pivot_op(pivot_row, pivot_col)
+        basis[pivot_row] = pivot_col
+    if itc >= max_iter:
+        return False, phase1_table, basis, ("\n".join(logs) if logs else None)
+    sum_art = -phase1_table[m, -1]
+    feasible = (sum_art <= tol)
+    return feasible, phase1_table, basis, ("\n".join(logs) if logs else None)
+
+def prepare_phase2_table(phase1_table, basis, c, n, slack_count, art_count):
+    m = phase1_table.shape[0] - 1
+    new_nvars = n + slack_count
+    table2 = np.zeros((m + 1, new_nvars + 1), dtype=float)
+    table2[:m, :new_nvars] = phase1_table[:m, :new_nvars]
+    table2[:m, -1] = phase1_table[:m, -1]
+    for j in range(n):
+        table2[m, j] = -c[j]
+    for j in range(n, new_nvars):
+        table2[m, j] = 0.0
+    for i in range(m):
+        colb = basis[i]
+        if colb < n:
+            cc = c[colb]
+            if abs(cc) > 1e-12:
+                table2[m, :] += cc * table2[i, :]
+    return table2
+
+def run_phase2_iterations(table2, basis, n, slack_count, tol=1e-10, max_iter=1000, save_logs=False):
+    m = table2.shape[0] - 1
+    nvars = n + slack_count
+    logs = [] if save_logs else None
+    def snap(itc, pc=None, pr=None):
+        if logs is not None:
+            lines = [f"=== Фаза 2, итерация {itc} ===", "Таблица:"]
+            for rr in range(table2.shape[0]):
+                rowstr = " ".join(f"{xx:8.3f}" for xx in table2[rr, :])
+                lines.append(rowstr)
+            lines.append(f"basis={basis}\n")
+            logs.append("\n".join(lines))
+    def pivot_op(prow, pcol):
+        piv = table2[prow, pcol]
+        table2[prow, :] /= piv
+        for rr in range(table2.shape[0]):
+            if rr != prow:
+                fac = table2[rr, pcol]
+                table2[rr, :] -= fac * table2[prow, :]
+    itc = 0
+    snap(itc)
+    while itc < max_iter:
+        itc += 1
+        obj_row = table2[m, :nvars]
+        pivot_col = np.argmin(obj_row)
+        min_val = obj_row[pivot_col]
+        if min_val >= -tol:
+            snap(itc)
+            return True, table2, basis, ("\n".join(logs) if logs else None)
+        pivot_row = -1
+        best_ratio = None
+        for i in range(m):
+            el = table2[i, pivot_col]
+            if el > tol:
+                ratio = table2[i, -1] / el
+                if pivot_row < 0 or ratio < best_ratio:
+                    best_ratio = ratio
+                    pivot_row = i
+        if pivot_row < 0:
+            snap(itc, pivot_col, pivot_row)
+            return False, table2, basis, ("\n".join(logs) if logs else None)
+        snap(itc, pivot_col, pivot_row)
+        pivot_op(pivot_row, pivot_col)
+        basis[pivot_row] = pivot_col
+    return False, table2, basis, ("\n".join(logs) if logs else None)
+
+def extract_solution(table2, basis, n, slack_count, art_count, tol=1e-10):
+    m = table2.shape[0] - 1
+    x_opt = np.zeros(n, dtype=float)
+    for i in range(m):
+        col_b = basis[i]
+        val = table2[i, -1]
+        if col_b < n:
+            x_opt[col_b] = val
+    real_obj = table2[m, -1]
+    if any(x < -tol for x in x_opt):
+        return None, None, False
+    return x_opt, real_obj, True
+
+def check_solution_feasibility(A, b, con_types, x_opt, tol=1e-10):
+    m = A.shape[0]
+    lhs = A.dot(x_opt)
+    for i in range(m):
+        if con_types[i] == "<=":
+            if lhs[i] > b[i] + tol:
+                return False
+        elif con_types[i] == ">=":
+            if lhs[i] < b[i] - tol:
+                return False
+        elif con_types[i] == "=":
+            if abs(lhs[i] - b[i]) > tol:
+                return False
+        else:
+            return False
+    for x in x_opt:
+        if x < -tol:
+            return False
+    return True
+
+def solve_LP_two_phase(A, b, con_types, c):
+    A_le, b_le, need_art = normalize_constraints(A, b, con_types)
+    m, n = A_le.shape
+    slack_count = sum(not f for f in need_art)
+    art_count = sum(f for f in need_art)
+    p1_table, basis, sidx, aidx = build_phase1_table(A_le, b_le, need_art)
+    feasible1, p1_table, basis, log1 = run_phase1_iterations(p1_table, basis, aidx, save_logs=True)
+    for i in range(m):
+        if basis[i] >= n + slack_count:
+            for j in range(n + slack_count):
+                if abs(p1_table[i, j]) > 1e-10:
+                    piv = p1_table[i, j]
+                    p1_table[i, :] /= piv
+                    for k in range(m + 1):
+                        if k != i:
+                            fac = p1_table[k, j]
+                            p1_table[k, :] -= fac * p1_table[i, :]
+                    basis[i] = j
+                    break
+    sum_art = -p1_table[m, -1]
+    feasible1 = (sum_art <= 1e-10)
+    if not feasible1:
+        return (False, None, None, "Infeasible\n" + (log1 or ""))
+    table2 = prepare_phase2_table(p1_table, basis, c, n, slack_count, art_count)
+    ok2, final_table, final_basis, log2 = run_phase2_iterations(table2, basis, n, slack_count, save_logs=True)
+    logs = (log1 or "") + "\n=== PHASE2===\n" + (log2 or "")
+    if not ok2:
+        return (False, None, None, "Unbounded or stuck\n" + logs)
+    x_opt, f_val, nonneg_ok = extract_solution(final_table, final_basis, n, slack_count, art_count)
+    if not nonneg_ok:
+        return (False, None, None, "X had negative entries\n" + logs)
+    feasible = check_solution_feasibility(A, b, con_types, x_opt)
+    if not feasible:
+        return (False, None, None, "Solution violates constraints\n" + logs)
+    return (True, x_opt, f_val, logs)
+
+def generate_LP_task(num_vars_range=(2,5), num_constraints_range=(2,5), coef_range=(-5,5)):
+    n_min, n_max = num_vars_range
+    m_min, m_max = num_constraints_range
+    num_vars = np.random.randint(n_min, n_max+1)
+    num_constraints = np.random.randint(m_min, m_max+1)
+    A = np.random.randint(coef_range[0], coef_range[1]+1, (num_constraints, num_vars))
+    b = np.random.randint(1, 6, size=num_constraints)
+    c = np.random.randint(coef_range[0], coef_range[1]+1, size=num_vars)
+    con_types = np.random.choice(["<=", ">=", "="], size=num_constraints)
+    return A, b.astype(float), c.astype(float), con_types
 
 def generate_tex(tasks, tex_filename="tasks_solutions.tex"):
     with open(tex_filename, "w", encoding="utf-8") as f:
@@ -65,98 +265,124 @@ def generate_tex(tasks, tex_filename="tasks_solutions.tex"):
             A = info["A"]
             b = info["b"]
             c = info["c"]
-            types = info["con_types"]
-            f.write(r"\subsection*{Задача №" + str(i) + "}\n")
+            ctypes = info["con_types"]
+            found = info["solution_found"]
+            f.write(r"\subsection*{Задача №" + str(i) + "}" "\n")
+            if not found:
+                f.write(r"\textbf{Задача не имеет решения или возникла ошибка.}" "\n\n")
+                continue
             f.write(r"\textbf{Функция цели: }" "\n")
-            obj_parts = []
-            for idx, coef in enumerate(c):
-                sign = "+" if (coef >= 0 and idx > 0) else ""
-                obj_parts.append(f"{sign}{coef}x_{{{idx+1}}}")
-            f.write("maximize $ " + " ".join(obj_parts) + " $\\\\\n\n")
+            parts = []
+            for idx, cf in enumerate(c):
+                sign = "+" if (cf >= 0 and idx > 0) else ""
+                parts.append(f"{sign}{cf}x_{{{idx+1}}}")
+            f.write(f"maximize $ {' '.join(parts)} $\\\\" "\n\n")
             f.write(r"\textbf{Ограничения:}" "\n\n")
             f.write(r"\[ \begin{aligned}" "\n")
-            for row_idx, row in enumerate(A):
-                row_expr = []
-                for var_idx, val in enumerate(row):
-                    sign = "+" if (val >= 0 and var_idx > 0) else ""
-                    row_expr.append(f"{sign}{val}x_{{{var_idx+1}}}")
-                if types[row_idx] == "<=":
+            for row_i, rowval in enumerate(A):
+                rowExpr = []
+                for col_j, val_j in enumerate(rowval):
+                    s = "+" if (val_j >= 0 and col_j > 0) else ""
+                    rowExpr.append(f"{s}{val_j}x_{{{col_j+1}}}")
+                if ctypes[row_i] == "<=":
                     rel = r"\le"
-                elif types[row_idx] == ">=":
+                elif ctypes[row_i] == ">=":
                     rel = r"\ge"
                 else:
-                    rel = r"="
-                f.write(" ".join(row_expr) + f" &{rel} {b[row_idx]} \\\\ \n")
-            f.write("x_i &\\ge 0, \\quad i=1,\\dots," + str(len(c)) + " \\\\ \n")
+                    rel = "="
+                f.write(" ".join(rowExpr) + f" &{rel} {b[row_i]} \\\\" "\n")
+            f.write("x_i &\\ge 0,\\quad i=1,..," + str(len(c)) + "\\\\" "\n")
             f.write(r"\end{aligned}\]" "\n\n")
-            if info["solution_found"]:
-                val = info["optimal_value"]
-                sol_str = ", ".join([f"x_{{{j+1}}}={valj:.2f}" for j, valj in enumerate(info["solution_vector"])])
-                f.write(r"\textbf{Оптимальное значение: }" + f"${val:.2f}$\n\n")
-                f.write(r"\textbf{Решение: }" + f"${sol_str}$\n\n")
-            else:
-                f.write(r"\textbf{Задача не имеет решения или возникла ошибка.}" "\n\n")
-            if "steps" in info and info["steps"]:
-                f.write(r"\textbf{Шаги симплекс-метода (упрощённо):}" "\n\n")
-                f.write(r"\begin{verbatim}" + "\n")
+            val = info["optimal_value"]
+            xsol = info["solution_vector"]
+            solStr = ", ".join([f"x_{{{vv+1}}}={xsol[vv]:.2f}" for vv in range(len(xsol))])
+            f.write(r"\textbf{Оптимальное значение: }" + "$" + f"{val:.2f}" + "$" "\n\n")
+            f.write(r"\textbf{Решение: }" + "$" + solStr + "$" "\n\n")
+            if info["steps"]:
+                f.write(r"\textbf{Шаги двухфазного метода (лог):}" "\n\n")
+                f.write(r"\begin{verbatim}" "\n")
                 f.write(info["steps"] + "\n")
-                f.write(r"\end{verbatim}" + "\n\n")
+                f.write(r"\end{verbatim}" "\n\n")
             f.write("\n\n")
         f.write(r"\end{document}")
-
+        
 def compile_tex_to_pdf(tex_filename):
     try:
         subprocess.run(["pdflatex", tex_filename], check=True)
-        print(f"PDF-файл сформирован из {tex_filename}.")
+        print("PDF создан:", tex_filename)
     except FileNotFoundError:
-        print("Команда pdflatex не найдена. Установите LaTeX или добавьте pdflatex в PATH.")
+        print("pdflatex не найден.")
     except subprocess.CalledProcessError:
-        print("Ошибка при компиляции LaTeX-файла.")
-
-def main_demo(num_tasks=3, output_file_txt="generated_tasks_and_solutions.txt", output_file_tex="tasks_solutions.tex", generate_pdf=True):
+        print("Ошибка pdflatex.")
+        
+def main_demo(num_tasks=3, max_regen_attempts=20, output_file_txt="generated_tasks_and_solutions.txt", output_file_tex="tasks_solutions.tex", generate_pdf=True):
     tasks_info = []
     with open(output_file_txt, "w", encoding="utf-8") as f_out:
         for i in range(num_tasks):
-            A, b, c, con_types = generate_LP_task()
-            res = solve_LP_task(A, b, c, con_types)
+            feasible = False
+            final_A = None
+            final_b = None
+            final_c = None
+            final_ct = None
+            final_x = None
+            final_val = None
+            final_steps = ""
+            for attempt in range(max_regen_attempts):
+                A_try, b_try, c_try, ct_try = generate_LP_task()
+                res_feasible, x_opt, f_val1, logs = solve_LP_two_phase(A_try, b_try, ct_try, c_try)
+                if res_feasible:
+                    feasible = True
+                    final_A = A_try
+                    final_b = b_try
+                    final_c = c_try
+                    final_ct = ct_try
+                    final_x = x_opt
+                    final_val = f_val1
+                    final_steps = logs
+                    break
             f_out.write(f"--- Задача №{i+1} ---\n")
+            if not feasible:
+                f_out.write("Не удалось сгенерировать годную задачу (неразрешима, unbounded, etc.)\n\n")
+                tasks_info.append({
+                    "task_number": i + 1,
+                    "A": None,
+                    "b": None,
+                    "c": None,
+                    "con_types": None,
+                    "solution_found": False,
+                    "optimal_value": None,
+                    "solution_vector": None,
+                    "steps": None
+                })
+                continue
             f_out.write("Maximize: ")
-            f_out.write(" + ".join([f"{c[j]}*x{j+1}" for j in range(len(c))]))
-            f_out.write("\nSubject to:\n")
-            for row_idx, row in enumerate(A):
-                lhs_str = " + ".join([f"{row[j]}*x{j+1}" for j in range(len(row))])
-                if con_types[row_idx] == "<=":
-                    sign = "<="
-                elif con_types[row_idx] == ">=":
-                    sign = ">="
-                else:
-                    sign = "="
-                f_out.write(f"   {lhs_str} {sign} {b[row_idx]}\n")
-            f_out.write("   x >= 0\n\n")
-            found = False
-            opt_val = None
-            solution_vec = None
-            solution_steps = getattr(res, "steps", "")
-            if res.success:
-                opt_val = -res.fun
-                solution_vec = res.x
-                found = True
-                f_out.write(f"Оптимальное значение (max c^T x): {opt_val:.4f}\n")
-                f_out.write("Оптимальное решение (x*): [")
-                f_out.write(", ".join([f"{val:.4f}" for val in solution_vec]))
-                f_out.write("]\n\n")
-            else:
-                f_out.write("Задача не имеет решения (infeasible / unbounded) " f"или возникла ошибка: {res.message}\n\n")
-            if solution_steps:
-                f_out.write("Шаги симплекс-метода (упрощённо):\n")
-                f_out.write(solution_steps + "\n")
-            tasks_info.append({"task_number": i+1, "A": A, "b": b, "c": c, "con_types": con_types, "solution_found": found, "optimal_value": opt_val, "solution_vector": solution_vec, "steps": solution_steps})
+            eq_str = " + ".join([f"{final_c[j]}*x{j+1}" for j in range(len(final_c))])
+            f_out.write(eq_str + "\nSubject to:\n")
+            for rr, rowv in enumerate(final_A):
+                rowline = " + ".join([f"{rowv[cc]}*x{cc+1}" for cc in range(len(rowv))])
+                f_out.write(f"   {rowline} {final_ct[rr]} {final_b[rr]}\n")
+            f_out.write("  x >= 0\n\n")
+            f_out.write(f"Оптимальное значение: {final_val:.4f}\n")
+            f_out.write("Оптимальное решение: [")
+            f_out.write(", ".join([f"{vv:.4f}" for vv in final_x]))
+            f_out.write("]\n")
+            f_out.write("Шаги:\n")
+            f_out.write(final_steps + "\n\n")
+            tasks_info.append({
+                "task_number": i + 1,
+                "A": final_A,
+                "b": final_b,
+                "c": final_c,
+                "con_types": final_ct,
+                "solution_found": True,
+                "optimal_value": final_val,
+                "solution_vector": final_x,
+                "steps": final_steps
+            })
     generate_tex(tasks_info, tex_filename=output_file_tex)
     if generate_pdf:
         compile_tex_to_pdf(output_file_tex)
-    print(f"Сгенерировано {num_tasks} задач. Результаты: {output_file_txt}")
-    if generate_pdf:
-        print(f"Пытаемся создать PDF из {output_file_tex} (при наличии pdflatex).")
+    print(f"Сгенерировано {num_tasks} задач, результаты в {output_file_txt}, pdf -> {output_file_tex}")
 
 if __name__ == "__main__":
-    main_demo()
+    main_demo(num_tasks=5)
