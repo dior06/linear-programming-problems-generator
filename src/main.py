@@ -55,17 +55,47 @@ def build_phase1_table(A_le, b_le, need_art):
             phase1_table[m, :] -= phase1_table[i, :]
     return phase1_table, basis, slack_indices, art_indices
 
-def run_phase1_iterations(phase1_table, basis, art_indices, tol=1e-10, max_iter=1000, save_logs=False):
+def format_number(x):
+    if abs(x - round(x)) < 1e-10:
+        return str(int(round(x)))
+    else:
+        return f"{x:.2f}"
+
+
+def make_var_names(n, slack_count=0, art_count=0):
+    names = []
+    for i in range(n):
+        names.append(f"x{i+1}")
+    for i in range(slack_count):
+        names.append(f"a{i+1}")
+    for i in range(art_count):
+        names.append(f"s{i+1}")
+    return names
+
+def run_phase1_iterations(phase1_table, basis, art_indices, tol=1e-10, max_iter=1000, save_logs=False, n=0, slack_count=0, art_count=0):
     m = phase1_table.shape[0] - 1
     nvars = phase1_table.shape[1] - 1
+    var_names = make_var_names(n, slack_count, art_count)
+    col_labels = var_names + ["RHS"]
     logs = [] if save_logs else None
     def snap(iterc, pc=None, pr=None):
         if logs is not None:
             lines = [f"=== Итерация {iterc} ===", "Таблица:"]
-            for rr in range(phase1_table.shape[0]):
-                rowvals = " ".join(f"{xx:8.3f}" for xx in phase1_table[rr, :])
-                lines.append(rowvals)
-            lines.append(f"basis = {basis}\n")
+            header_row = ["   "] + [f"{nm:>7s}" for nm in col_labels]
+            lines.append(" | ".join(header_row))
+            for i in range(m):
+                b_idx = basis[i]
+                row_label = var_names[b_idx] if b_idx < len(var_names) else f"Row{i}"
+                row_data = []
+                for val in phase1_table[i, :]:
+                    row_data.append(f"{format_number(val):>7s}")
+                line_str = f"{row_label:>3s} | " + " | ".join(row_data)
+                lines.append(line_str)
+            obj_row_data = [f"{format_number(val):>7s}" for val in phase1_table[m, :]]
+            line_str = f"{'Obj':>3s} | " + " | ".join(obj_row_data)
+            lines.append(line_str)
+            basis_vars = [var_names[b] if b < len(var_names) else f"??" for b in basis]
+            lines.append(f"basis = {basis_vars}\n")
             logs.append("\n".join(lines))
     def pivot_op(prow, pcol):
         piv = phase1_table[prow, pcol]
@@ -126,14 +156,26 @@ def prepare_phase2_table(phase1_table, basis, c, n, slack_count, art_count):
 def run_phase2_iterations(table2, basis, n, slack_count, tol=1e-10, max_iter=1000, save_logs=False):
     m = table2.shape[0] - 1
     nvars = n + slack_count
+    var_names = make_var_names(n, slack_count, art_count=0)
+    col_labels = var_names + ["RHS"]
     logs = [] if save_logs else None
     def snap(itc, pc=None, pr=None):
         if logs is not None:
             lines = [f"=== Фаза 2, итерация {itc} ===", "Таблица:"]
-            for rr in range(table2.shape[0]):
-                rowstr = " ".join(f"{xx:8.3f}" for xx in table2[rr, :])
-                lines.append(rowstr)
-            lines.append(f"basis={basis}\n")
+            header_row = ["   "] + [f"{nm:>7s}" for nm in col_labels]
+            lines.append(" | ".join(header_row))
+            for i in range(m):
+                b_idx = basis[i]
+                row_label = var_names[b_idx] if b_idx < len(var_names) else f"Row{i}"
+                row_data = [f"{format_number(val):>7s}" for val in table2[i, :]]
+                line_str = f"{row_label:>3s} | " + " | ".join(row_data)
+                lines.append(line_str)
+            obj_data = [f"{format_number(val):>7s}" for val in table2[m, :]]
+            line_str = f"{'Obj':>3s} | " + " | ".join(obj_data)
+            lines.append(line_str)
+
+            basis_vars = [var_names[b] if b < len(var_names) else f"??" for b in basis]
+            lines.append(f"basis={basis_vars}\n")
             logs.append("\n".join(lines))
     def pivot_op(prow, pcol):
         piv = table2[prow, pcol]
@@ -208,7 +250,17 @@ def solve_LP_two_phase(A, b, con_types, c):
     slack_count = sum(not f for f in need_art)
     art_count = sum(f for f in need_art)
     p1_table, basis, sidx, aidx = build_phase1_table(A_le, b_le, need_art)
-    feasible1, p1_table, basis, log1 = run_phase1_iterations(p1_table, basis, aidx, save_logs=True)
+    feasible1, p1_table, basis, log1 = run_phase1_iterations(
+    p1_table,
+    basis,
+    aidx,
+    tol=1e-10,
+    max_iter=1000,
+    save_logs=True,
+    n=n,
+    slack_count=slack_count,
+    art_count=art_count
+)
     for i in range(m):
         if basis[i] >= n + slack_count:
             for j in range(n + slack_count):
@@ -276,7 +328,7 @@ def generate_tex(tasks, tex_filename="tasks_solutions.tex"):
             for idx, cf in enumerate(c):
                 sign = "+" if (cf >= 0 and idx > 0) else ""
                 parts.append(f"{sign}{cf}x_{{{idx+1}}}")
-            f.write(f"maximize $ {' '.join(parts)} $\\\\" "\n\n")
+            f.write(f"Найти максимум $ {' '.join(parts)} $\\\\" "\n\n")
             f.write(r"\textbf{Ограничения:}" "\n\n")
             f.write(r"\[ \begin{aligned}" "\n")
             for row_i, rowval in enumerate(A):
@@ -355,7 +407,7 @@ def main_demo(num_tasks=3, max_regen_attempts=20, output_file_txt="generated_tas
                     "steps": None
                 })
                 continue
-            f_out.write("Maximize: ")
+            f_out.write("Найти максимум: ")
             eq_str = " + ".join([f"{final_c[j]}*x{j+1}" for j in range(len(final_c))])
             f_out.write(eq_str + "\nSubject to:\n")
             for rr, rowv in enumerate(final_A):
