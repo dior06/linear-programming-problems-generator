@@ -61,13 +61,11 @@ def format_number(x):
         return f"{x:.2f}"
 
 def make_var_names(n, slack_count=0, art_count=0):
-    names = []
-    for i in range(n):
-        names.append(f"x{i+1}")
+    names = [f"x{i+1}" for i in range(n)]
     for i in range(slack_count):
-        names.append(f"a{i+1}")
-    for i in range(art_count):
         names.append(f"s{i+1}")
+    for i in range(art_count):
+        names.append(f"a{i+1}")
     return names
 
 def run_phase1_iterations(phase1_table, basis, art_indices, tol=1e-10, max_iter=1000, save_logs=False, n=0, slack_count=0, art_count=0):
@@ -103,6 +101,7 @@ def run_phase1_iterations(phase1_table, basis, art_indices, tol=1e-10, max_iter=
                 phase1_table[rr, :] -= fac * phase1_table[prow, :]
     itc = 0
     while itc < max_iter:
+        snap(itc)
         obj_row = phase1_table[m, :nvars]
         pivot_col = np.argmin(obj_row)
         min_val = obj_row[pivot_col]
@@ -119,7 +118,7 @@ def run_phase1_iterations(phase1_table, basis, art_indices, tol=1e-10, max_iter=
                     pivot_row = i
         if pivot_row < 0:
             return False, phase1_table, basis, ("\n".join(logs) if logs else None)
-        snap(itc)
+        # snap(itc)
         pivot_op(pivot_row, pivot_col)
         basis[pivot_row] = pivot_col
         itc += 1
@@ -180,6 +179,7 @@ def run_phase2_iterations(table2, basis, n, slack_count, tol=1e-10, max_iter=100
                 table2[rr, :] -= fac * table2[prow, :]
     itc = 0
     while itc < max_iter:
+        snap(itc)
         obj_row = table2[m, :nvars]
         pivot_col = np.argmin(obj_row)
         min_val = obj_row[pivot_col]
@@ -196,7 +196,7 @@ def run_phase2_iterations(table2, basis, n, slack_count, tol=1e-10, max_iter=100
                     pivot_row = i
         if pivot_row < 0:
             return False, table2, basis, ("\n".join(logs) if logs else None), itc
-        snap(itc)
+        # snap(itc)
         pivot_op(pivot_row, pivot_col)
         basis[pivot_row] = pivot_col
         itc += 1
